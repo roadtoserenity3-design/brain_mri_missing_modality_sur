@@ -1,0 +1,13 @@
+# Markdown files
+*.md
+
+# Image files
+*.png
+*.jpg
+*.jpeg
+
+# PDF files
+*.pdf
+
+# macOS
+.DS_Store

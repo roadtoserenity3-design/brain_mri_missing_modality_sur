@@ -9,5 +9,25 @@
 # PDF files
 *.pdf
 
+# Word documents
+*.docx
+*.doc
+
+# Data directories
+data/
+datalist/
+Text/
+
+# Medical image formats
+*.nii
+*.nii.gz
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.mha
+*.mhd
+*.dcm
+
 # macOS
 .DS_Store

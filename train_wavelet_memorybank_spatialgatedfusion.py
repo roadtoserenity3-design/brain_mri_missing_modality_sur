@@ -22,7 +22,7 @@ from data.transforms import *
 from data.datasets_nii import Brats_loadall_nii, Brats_loadall_val_nii, Brats_loadall_test_nii
 from data.data_utils import init_fn
 
-from predict_unet_memorybank_graph import AverageMeter, test_softmax
+from predict_wavelet_memorybank_spatialgatedfusion import AverageMeter, test_softmax
 
 import torch.nn.functional as F
 
@@ -63,6 +63,7 @@ parser.add_argument('--seed', default=999, type=int)
 parser.add_argument('--lambda_pref', default=0.01, type=float)
 parser.add_argument('--pref_margin', default=0.1, type=float)
 parser.add_argument('--hf_warmup_epochs', default=5, type=int)   # set 0 to disable warmup
+parser.add_argument('--lambda_align', default=0.1, type=float)
 
 
 ## parser arguments
@@ -269,8 +270,9 @@ def main():
 
                 loss_hf = aux["hf_energy_loss"] * float(model.lambda_hf_energy)
                 loss_use = aux.get("use_loss", x.new_zeros(())) * float(getattr(model, "lambda_use", 0.0))
+                loss_align = aux.get("align_loss", x.new_zeros(()))
 
-                loss = loss_seg + (args.lambda_pref * loss_pref) + loss_hf + loss_use
+                loss = loss_seg + (args.lambda_pref * loss_pref) + loss_hf + loss_use + (args.lambda_align * loss_align)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
@@ -283,6 +285,7 @@ def main():
                 f"Loss {loss.item():.4f}, Seg {loss_seg.item():.4f}, "
                 f"CE {ce.item():.4f}, Dice {dice.item():.4f}, "
                 f"Pref {loss_pref.item():.4f}, HF {to_float(loss_hf):.4f}, Use {to_float(loss_use):.4f}, "
+                f"Align {to_float(loss_align):.4f}, "
                 f"lr {step_lr:.2e}"
             )
             logging.info(msg)
@@ -321,6 +324,7 @@ def main():
                     dataname=args.dataname,
                     save_dir=args.savepath,
                 )
+            val_WT, val_TC, val_ET, val_ETpp = dice_score
 
             logging.info(
                 f"Validate epoch={epoch}, WT={to_float(val_WT):.2f}, TC={to_float(val_TC):.2f}, "

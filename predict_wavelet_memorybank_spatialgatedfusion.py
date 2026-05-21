@@ -6,7 +6,6 @@ import torch.nn.functional as F
 
 import numpy as np
 import nibabel as nib
-from kornia import x
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 

@@ -255,7 +255,7 @@ class ContextQueryBuilderWavelet(nn.Module):
             mask = mask.bool()
         B, K, C, h, w, d = x5_stack.shape
 
-        ll_list, hf_list = [], []
+        ll_list, hf_list = [], [] 
         for m in range(K):
             ll, hf = wavelet_like_split_x5(x5_stack[:, m])
             ll_list.append(gap_3d(ll))          # (B, C)
@@ -420,6 +420,7 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
                  lambda_use: float=0.0,         #optional: encourage some usage of retrieved (see below)
                  tau_use: float=0.10,           #threshold for usage regularizer (if lambda_use>0)
                  update_memory: bool=True,
+                 x5_spatial_size: Tuple[int,int,int]=(8,8,8),  # crop_size=128 with 4x MaxPool3d(2)
                  ):
         super().__init__()
         self.update_memory = update_memory
@@ -441,9 +442,12 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
         self.retriever = MemoryRetriever(temperature=temperature)
         self.memory = ModalityMemoryBank(num_modals=num_modals, mem_size=mem_size, key_dim=key_dim, val_dim=2*self.c5)
 
-        #lazy init for LL/HF decoders
-        self._val_to_ll5 = None #(B, c5, h/2, w/2, d/2)
-        self._val_to_hf5 = None #(B, c5, h, w, d)
+        #LL/HF map decoders — initialized at construction with fixed x5 spatial size
+        _h, _w, _d = x5_spatial_size
+        assert (_h % 2 == 0) and (_w % 2 == 0) and (_d % 2 == 0), \
+            "x5_spatial_size dims must be even for LL split."
+        self._val_to_ll5 = ValToMap(C=self.c5, out_shape=(_h//2, _w//2, _d//2))
+        self._val_to_hf5 = ValToMap(C=self.c5, out_shape=(_h, _w, _d))
 
         #hallucination path from x5 --> x4...x1
         self.gen4 = nn.Sequential(
@@ -480,12 +484,9 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
         self.softmax = nn.Softmax(dim=1)
 
     def _init_val_to_maps_if_needed(self, x5_map: torch.Tensor):
-        if (self._val_to_ll5 is None) or (self._val_to_hf5 is None):
-            _, _, h, w, d = x5_map.shape
-            assert (h % 2 == 0) and (w % 2 ==0) and (d % 2 == 0), "x5 dims must be divisible by 2 for LL split."
-
-            self._val_to_ll5 = ValToMap(C=self.c5, out_shape=(h//2, w//2, d//2)).to(x5_map.device)
-            self._val_to_hf5 = ValToMap(C=self.c5, out_shape=(h,w,d)).to(x5_map.device)
+        # No-op: _val_to_ll5 and _val_to_hf5 are now initialized in __init__.
+        # Kept for backward compatibility with existing train/test scripts.
+        pass
 
     @staticmethod
     def _x5_to_memvals(x5_map: torch.Tensor) -> torch.Tensor:
@@ -545,11 +546,14 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
         s5_real = torch.stack([flair_x5, t1ce_x5, t1_x5, t2_x5], dim=1)  # (B,K,c5,h,w,d)
 
         # ----- Build wavelet-aware query from AVAILABLE MODALITIES -----
-        q = self.query_builder(s5_real, mask) # (B, key_dim)
+        q_read = self.query_builder(s5_real, mask)  # (B, key_dim) — varies with mask
+        full_mask = torch.ones_like(mask)
+        q_write = self.query_builder(s5_real, full_mask)  # (B, key_dim) — always full-modal context
+        q = q_read  # downstream retrieval uses q_read
 
         #----- Update memory using present modalities -----
         if self.training and self.update_memory:
-            self._memory_update_from_present(q, s5_real, mask)
+            self._memory_update_from_present(q_write, s5_real, mask)
 
         # ----- Init LL/ HF decoders once we know x5 size -----
         self._init_val_to_maps_if_needed(flair_x5)
@@ -593,7 +597,10 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
 
                 #HF-energy loss (only when missing, training)
                 if self.training and self.lambda_hf_energy > 0:
-                    _, hf_true = wavelet_like_split_x5(real_x5_maps[m][missing_idx])
+                    # .detach() prevents gradients from flowing into the "missing" modality
+                    # encoder, which would be an information leak (encoder sees ground truth
+                    # it should not have access to at inference time).
+                    _, hf_true = wavelet_like_split_x5(real_x5_maps[m][missing_idx].detach())
                     _, hf_pred = wavelet_like_split_x5(x5_recon)
                     e_true = gap_3d(hf_true.abs())
                     e_pred = gap_3d(hf_pred.abs())
@@ -685,6 +692,11 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
         if not return_aux:
             return probs
 
+        if self.training and self.update_memory:
+            align_loss = (1.0 - F.cosine_similarity(q_write, q_read, dim=-1)).mean()
+        else:
+            align_loss = x.new_zeros(())
+
         aux = {
             "q": q.detach(),
             "conf": conf.detach(),  # (B,K)
@@ -692,6 +704,7 @@ class MultiModalUNet_WaveletMem_SpatialFuse(nn.Module):
             "gates5": gates5.detach(),  # (B,K,H,W,D) at x5
             "hf_energy_loss": hf_energy_loss,  # scalar
             "use_loss": loss_use,  # scalar (maybe 0)
+            "align_loss": align_loss,  # scalar
         }
         aux.update(attn_debug)
         return probs, aux
